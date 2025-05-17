@@ -21,10 +21,11 @@ enum dmx_interrupt_mask_t {
   DMX_INTR_RX_FIFO_OVERFLOW = UART_INTR_RXFIFO_OVF,
   DMX_INTR_RX_FRAMING_ERR = UART_INTR_PARITY_ERR | UART_INTR_FRAM_ERR,
   DMX_INTR_RX_ERR = DMX_INTR_RX_FIFO_OVERFLOW | DMX_INTR_RX_FRAMING_ERR,
+  DMX_INTR_IDLE = UART_INTR_RXFIFO_TOUT,
 
   DMX_INTR_RX_BREAK = UART_INTR_BRK_DET,
   DMX_INTR_RX_DATA = UART_INTR_RXFIFO_FULL,
-  DMX_INTR_RX_ALL = DMX_INTR_RX_DATA | DMX_INTR_RX_BREAK | DMX_INTR_RX_ERR,
+  DMX_INTR_RX_ALL = DMX_INTR_RX_DATA | DMX_INTR_RX_BREAK | DMX_INTR_RX_ERR | DMX_INTR_IDLE,
 
   DMX_INTR_TX_DATA = UART_INTR_TXFIFO_EMPTY,
   DMX_INTR_TX_DONE = UART_INTR_TX_DONE,
@@ -174,6 +175,34 @@ uint32_t dmx_uart_get_txfifo_len(dmx_port_t dmx_num);
  * bytes written.
  */
 void dmx_uart_write_txfifo(dmx_port_t dmx_num, const void *buf, int *size);
+
+/**
+ * @brief Set timeout for the UART idle interrupt. User must also adjust FIFO
+ * full threshold to be greater than 1 with dmx_uart_set_rx_fifo_threshold,
+ *  since the idle timeout only fires if there is at least one byte still
+ * in the UART RX FIFO.
+ * 
+ * @param dmx_num DMX UART number
+ * @param byte_time_periods Number of byte periods for the timeout length.
+ * This this value will be multiplied by the actual time it takes to transmit
+ * one byte on the UART (1 start bit, 8 data bits, 2 stop bits at 250kbaud for
+ * standard DMX)
+ */ 
+void dmx_uart_set_idle_timeout(dmx_port_t dmx_num, uint8_t byte_time_periods);
+
+/**
+ * @brief Set the number of bytes in the UART RX FIFO that should trigger
+ * the RX interrupt. Use this function in order to use the UART idle timeout
+ * interrupt functionality, as the idle interrupt only measures the time between
+ * the last byte in the RX FIFO and then next one. The default behavior of esp_dmx
+ * is to read every byte out of the FIFO as it arrives, so the idle interrupt
+ * will never fire.
+ * 
+ * @param dmx_num DMX UART number
+ * @param rx_fifo_threshold_bytes The number of bytes in the RX FIFO that should
+ * trigger thestandard RX data UART interrupt
+ */
+void dmx_uart_set_rx_fifo_threshold(dmx_port_t dmx_num, uint8_t rx_fifo_threshold_bytes);
 
 /**
  * @brief Resets the UART TX FIFO.

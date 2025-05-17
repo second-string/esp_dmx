@@ -79,10 +79,13 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
       }
       dmx_uart_clear_interrupt(dmx_num, DMX_INTR_RX_ALL);
 
-      // Handle DMX break condition
-      if (intr_flags & DMX_INTR_RX_BREAK) {
-        // Handle possible condition where expected packet size is too large
-        if (driver->dmx.progress == DMX_PROGRESS_IN_DATA && dmx_head > 0) {
+      if (intr_flags & DMX_INTR_IDLE) {
+        if (
+          (driver->dmx.progress == DMX_PROGRESS_IN_DATA && dmx_head > 0) ||
+          (driver->dmx.progress == DMX_PROGRESS_IN_BREAK && dmx_head > 0)
+          ) {
+          // Case 1: We received multiple FIFOs worth of data, weve been in progress receiving, now finish packet and notify task
+          // Case 2: We received 1 or more bytes after the break, but less than one FIFOs worth so we never transitioned from IN_BREAK -> IN_DATA. Finish packet and notify task
           taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
           driver->dmx.size = dmx_head - 1;  // Attempt to fix packet size
           if (driver->task_waiting) {
@@ -90,19 +93,36 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
                                eSetValueWithOverwrite, &task_awoken);
           }
           taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        } else {
+          // We somehow got an idle interrupt, which means there is 1 or more bytes in the RX FIFO, but we're not in a known state. Reset everything for another packet
+          // TODO :: flush FIFO?
+          taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          driver->dmx.status = DMX_STATUS_IDLE;
+          driver->dmx.progress = DMX_PROGRESS_COMPLETE;
+          driver->dmx.head = 0;
+          taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        }
+      } else if (intr_flags & DMX_INTR_RX_BREAK) {
+        if (driver->dmx.progress == DMX_PROGRESS_IN_DATA && dmx_head > 0) {
+          taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          driver->dmx.size = dmx_head - 1;  // Attempt to fix packet size
+          if (driver->task_waiting) {
+            xTaskNotifyFromISR(driver->task_waiting, DMX_ERR_NOT_ENOUGH_SLOTS,
+                           eSetValueWithOverwrite, &task_awoken);
+          }
+          taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
         }
 
-        // Reset the DMX buffer for the next packet
+        // Regardless of whether there was an in-progress packet or not when we got this break, reset the DMX buffer for the next packet
         taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
         driver->dmx.status = DMX_STATUS_RECEIVING;
         driver->dmx.progress = DMX_PROGRESS_IN_BREAK;
         driver->dmx.head = 0;
         taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-        continue;  // Nothing else to do on DMX break
       } else if (driver->dmx.progress == DMX_PROGRESS_IN_BREAK ||
                  driver->dmx.progress == DMX_PROGRESS_IN_MAB) {
+        // Data interrupt meaning we just got a FIFOs worth of RX data, set our progress to IN_DATA to continue to receive any further FIFOs
         taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-        // UART ISR cannot detect MAB so we go straight to DMX_PROGRESS_IN_DATA
         driver->dmx.progress = DMX_PROGRESS_IN_DATA;
         taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
       }
@@ -369,6 +389,8 @@ bool dmx_uart_init(dmx_port_t dmx_num, void *isr_context, int isr_flags) {
 
   dmx_uart_rxfifo_reset(dmx_num);
   dmx_uart_txfifo_reset(dmx_num);
+  dmx_uart_set_idle_timeout(dmx_num, 1);
+  dmx_uart_set_rx_fifo_threshold(dmx_num, 57);
   dmx_uart_disable_interrupt(dmx_num, UART_LL_INTR_MASK);
   dmx_uart_clear_interrupt(dmx_num, UART_LL_INTR_MASK);
 
@@ -489,6 +511,30 @@ void DMX_ISR_ATTR dmx_uart_write_txfifo(dmx_port_t dmx_num, const void *buf,
   const int txfifo_len = uart_ll_get_txfifo_len(uart->dev);
   if (*size > txfifo_len) *size = txfifo_len;
   uart_ll_write_txfifo(uart->dev, (uint8_t *)buf, *size);
+}
+
+void DMX_ISR_ATTR dmx_uart_set_idle_timeout(dmx_port_t dmx_num, uint8_t byte_time_periods) {
+  struct dmx_uart_t *uart = &dmx_uart_context[dmx_num];
+
+  // Copy logic from esp-idf HAL to keep dependency only on LL
+  // https://github.com/espressif/esp-idf/blob/7f6e7f4506a7831f01e63591d17b468b3eda10c3/components/hal/uart_hal.c#L152
+  uint8_t symbol_len = 1;
+  uart_parity_t parity_mode;
+  uart_stop_bits_t stop_bit;
+  uart_word_length_t data_bit;
+  uart_ll_get_data_bit_num(uart->dev, &data_bit);
+  uart_ll_get_stop_bits(uart->dev, &stop_bit);
+  uart_ll_get_parity(uart->dev, &parity_mode);
+  symbol_len += (data_bit < UART_DATA_BITS_MAX) ? (uint8_t)data_bit + 5 : 8;
+  symbol_len += (stop_bit > UART_STOP_BITS_1) ? 2 : 1;
+  symbol_len += (parity_mode > UART_PARITY_DISABLE) ? 1 : 0;
+
+  uart_ll_set_rx_tout(uart->dev, byte_time_periods * symbol_len);
+}
+
+void DMX_ISR_ATTR dmx_uart_set_rx_fifo_threshold(dmx_port_t dmx_num, uint8_t rx_fifo_threshold_bytes) {
+  struct dmx_uart_t *uart = &dmx_uart_context[dmx_num];
+  uart_ll_set_rxfifo_full_thr(uart->dev, rx_fifo_threshold_bytes);
 }
 
 void DMX_ISR_ATTR dmx_uart_txfifo_reset(dmx_port_t dmx_num) {
