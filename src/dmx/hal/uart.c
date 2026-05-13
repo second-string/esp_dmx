@@ -43,6 +43,34 @@ enum {
   RDM_TYPE_IS_UNKNOWN,  // The packet is RDM, but it is unclear what type it is.
 };
 
+
+/*
+ * @second-string
+ * Handle esp-idf periph control switch by using DMX_NUM to get the proper UART peripheral.
+ * `module` field of struct in uart_periph_signal array removed in 5.3.1
+ */
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
+static inline periph_module_t dmx_uart_get_periph_module(dmx_port_t dmx_num) {
+    switch (dmx_num) {
+        case 0:
+            return PERIPH_UART0_MODULE;
+            break;
+        case 1:
+            return PERIPH_UART1_MODULE;
+            break;
+#if SOC_UART_NUM > 2
+        case 2:
+            return PERIPH_UART2_MODULE;
+            break;
+#endif
+        default:
+            return PERIPH_UART0_MODULE;
+            break;
+    }
+}
+#endif
+
+
 static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
   const int64_t now = dmx_timer_get_micros_since_boot();
   dmx_driver_t *const driver = arg;
@@ -346,16 +374,23 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
 
 bool dmx_uart_init(dmx_port_t dmx_num, void *isr_context, int isr_flags) {
   struct dmx_uart_t *uart = &dmx_uart_context[dmx_num];
+  
+  periph_module_t module;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
+  module = dmx_uart_get_periph_module(dmx_num);
+#else
+  module = uart_periph_signal[dmx_num].module;
+#endif
 
-  periph_module_enable(uart_periph_signal[dmx_num].module);
+  periph_module_enable(module);
   if (dmx_num != 0) {  // Default UART port for console
 #if SOC_UART_REQUIRE_CORE_RESET
     // ESP32C3 workaround to prevent UART outputting garbage data
     uart_ll_set_reset_core(uart->dev, true);
-    periph_module_reset(uart_periph_signal[dmx_num].module);
+    periph_module_reset(module);
     uart_ll_set_reset_core(uart->dev, false);
 #else
-    periph_module_reset(uart_periph_signal[dmx_num].module);
+    periph_module_reset(module);
 #endif
   }
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
@@ -404,7 +439,15 @@ void dmx_uart_deinit(dmx_port_t dmx_num) {
   struct dmx_uart_t *uart = &dmx_uart_context[dmx_num];
   if (uart->num != 0) {  // Default UART port for console
     esp_intr_free(uart->isr_handle);
-    periph_module_disable(uart_periph_signal[uart->num].module);
+
+    periph_module_t module;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
+    module = dmx_uart_get_periph_module(dmx_num);
+#else
+    module = uart_periph_signal[dmx_num].module;
+#endif
+
+    periph_module_disable(module);
   }
 }
 
